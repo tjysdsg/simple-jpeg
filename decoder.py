@@ -1,4 +1,5 @@
 import sys
+from struct import unpack
 from math import *
 from memoize import memoize
 
@@ -211,7 +212,7 @@ def read_dnl(file):
 
 
 def read_sos(file):
-    """ Read the start of scan marker """
+    """Read the start of scan marker"""
     global component
     global num_components
     global dc
@@ -219,37 +220,57 @@ def read_sos(file):
     Ls = read_word(file)
     Ls -= 2
 
-    # Read number of components in scan
+    # read number of components in scan
     Ns = read_byte(file)
+    print("Number of components", Ns)
     Ls -= 1
 
     for i in range(Ns):
-        # Read the scan component selector
+        # read the scan component selector
         Cs = read_byte(file)
+        print("Scan component selector:", Cs)
         Ls -= 1
-        # Read the huffman table selectors
+
+        # read the huffman table selectors
         Ta = read_byte(file)
         Ls -= 1
         Td = Ta >> 4
         Ta &= 0xF
-        # Assign the DC huffman table
+        print("AC entropy coding table destination selector:", Ta)
+        print("DC entropy coding table destination selector:", Td)
+
+        # assign the DC and AC huffman table
         component[Cs]['Td'] = Td
-        # Assign the AC huffman table
         component[Cs]['Ta'] = Ta
 
-    # Should be zero if baseline DCT
+    # should be zero if baseline DCT
     Ss = read_byte(file)
     Ls -= 1
-    # Should be 63 if baseline DCT
+    # should be 63 if baseline DCT
     Se = read_byte(file)
     Ls -= 1
-    # Should be zero if baseline DCT
+    # should be zero if baseline DCT
     A = read_byte(file)
     Ls -= 1
 
-    print("Ns:%d Ss:%d Se:%d A:%02X" % (Ns, Ss, Se, A))
     num_components = Ns
-    dc = [0 for i in range(num_components + 1)]
+    dc = [0 for _ in range(num_components + 1)]
+
+
+def remove_ff00(data):
+    ret = []
+    i = 0
+    while True:
+        b, bnext = unpack("BB", data[i:i + 2])
+        if b == 0xff:
+            if bnext != 0:
+                break
+            ret.append(data[i])
+            i += 2
+        else:
+            ret.append(data[i])
+            i += 1
+    return ret, i
 
 
 @memoize
@@ -264,48 +285,48 @@ def calc_add_bits(len, val):
 
 
 def bit_read(file):
-    """ Read one bit from file and handle markers and byte stuffing This is a generator function, google it. """
+    """Read one bit from file and handle markers and byte stuffing"""
     global EOI
     global dc
     global inline_dc
 
-    input = file.read(1)
-    while input and not EOI:
-        if input == chr(0xFF):
+    in_ = file.read(1)
+    while in_ and not EOI:
+        if in_ == chr(0xFF):
             cmd = file.read(1)
             if cmd:
-                # Byte stuffing
+                # byte stuffing
                 if cmd == chr(0x00):
-                    input = chr(0xFF)
-                # End of image marker
+                    in_ = chr(0xFF)
+                # end of image marker
                 elif cmd == chr(0xD9):
                     EOI = True
-                # Restart markers
+                # restart markers
                 elif 0xD0 <= ord(cmd) <= 0xD7 and inline_dc:
-                    # Reset dc value
+                    # reset dc value
                     dc = [0 for i in range(num_components + 1)]
-                    input = file.read(1)
+                    in_ = file.read(1)
                 else:
-                    input = file.read(1)
+                    in_ = file.read(1)
                     print("CMD: %x" % ord(cmd))
 
         if not EOI:
             for i in range(7, -1, -1):
-                # Output next bit
-                yield (ord(input) >> i) & 0x01
+                # output next bit
+                yield (ord(in_) >> i) & 0x01
 
-            input = file.read(1)
+            in_ = file.read(1)
 
     while True:
         yield []
 
 
 def get_bits(num, gen):
-    """ Get "num" bits from gen """
+    """Get "num" bits from gen"""
     out = 0
-    for i in range(num):
+    for _ in range(num):
         out <<= 1
-        val = gen.next()
+        val = gen.__next__()
         if val != []:
             out += val & 0x01
         else:
@@ -324,9 +345,8 @@ def print_and_pause(fn):
     return new
 
 
-# @print_and_pause
 def read_data_unit(comp_num):
-    """ Read one DU with component id comp_num """
+    """Read one DU with component id comp_num"""
     global bit_stream
     global component
     global dc
@@ -336,25 +356,24 @@ def read_data_unit(comp_num):
     comp = component[comp_num]
     huff_tbl = huffman_dc_tables[comp['Td']]
 
-    # Fill data with 64 coefficients
+    # fill data with 64 coefficients
     while len(data) < 64:
         key = 0
 
         for bits in range(1, 17):
             key_len = []
             key <<= 1
-            # Get one bit from bit_stream
+            # get one bit from bit_stream
             val = get_bits(1, bit_stream)
             if val == []:
                 break
             key |= val
-            # If huffman code exists
-            if huff_tbl.has_key((bits, key)):
-                key_len = huff_tbl[(bits, key)]
+            # if huffman code exists
+            key_len = huff_tbl.get[(bits, key), None]
+            if key_len is not None:
                 break
 
-        # After getting the DC value
-        # switch to the AC table
+        # after getting the DC value switch to the AC table
         huff_tbl = huffman_ac_tables[comp['Ta']]
 
         if key_len == []:
@@ -366,7 +385,7 @@ def read_data_unit(comp_num):
                 data.append(0)
             continue
 
-        # If not DC coefficient
+        # if not DC coefficient
         if len(data) != 0:
             # If End of block
             if key_len == 0x00:
@@ -375,8 +394,7 @@ def read_data_unit(comp_num):
                     data.append(0)
                 break
 
-            # The first part of the AC key_len
-            # is the number of leading zeros
+            # the first part of the AC key_len is the number of leading zeros
             for i in range(key_len >> 4):
                 if len(data) < 64:
                     data.append(0)
@@ -386,20 +404,16 @@ def read_data_unit(comp_num):
             break
 
         if key_len != 0:
-            # The rest of key_len is the amount
-            # of "additional" bits
+            # The rest of key_len is the amount of "additional" bits
             val = get_bits(key_len, bit_stream)
             if val == []:
                 break
             # Decode the additional bits
             num = calc_add_bits(key_len, val)
 
-            # Experimental, doesn't work right
+            # experimental, doesn't work right
             if len(data) == 0 and inline_dc:
-                # The DC coefficient value
-                # is added to the DC value from
-                # the corresponding DU in the
-                # previous MCU
+                # The DC coefficient value is added to the DC value from the corresponding DU in the previous MCU
                 num += dc[comp_num]
                 dc[comp_num] = num
 
@@ -411,6 +425,25 @@ def read_data_unit(comp_num):
         print("Wrong size", len(data))
 
     return data
+
+
+def read_mcu():
+    """Read an MCU"""
+    global component
+    global num_components
+    global mcus_read
+
+    mcu = [[] for _ in range(num_components)]
+    for i in range(num_components):
+        comp = component[i + 1]
+        # for each DU
+        for j in range(comp['H'] * comp['V']):
+            if not EOI:
+                mcu[i].append(read_data_unit(i + 1))
+
+    mcus_read += 1
+
+    return mcu
 
 
 def restore_dc(data):
@@ -434,28 +467,6 @@ def restore_dc(data):
         out.append(mcu)
 
     return out
-
-
-def read_mcu():
-    """ Read an MCU """
-    global component
-    global num_components
-    global mcus_read
-
-    comp_num = mcu = range(num_components)
-
-    # For each component
-    for i in comp_num:
-        comp = component[i + 1]
-        mcu[i] = []
-        # For each DU
-        for j in range(comp['H'] * comp['V']):
-            if not EOI:
-                mcu[i].append(read_data_unit(i + 1))
-
-    mcus_read += 1
-
-    return mcu
 
 
 def dequantify(mcu):
@@ -669,22 +680,6 @@ def prepare(x, y, z):
     return "#%02x%02x%02x" % (x, y, z)
 
 
-def display_image(data):
-    global XYP
-
-    X, Y, P = XYP
-
-    root = Tk()
-    im = PhotoImage(width=X, height=Y)
-
-    im.put(data)
-
-    w = Label(root, image=im, bd=0)
-    w.pack()
-
-    mainloop()
-
-
 if __name__ == "__main__":
     input_filename = sys.argv[1]
     input_file = open(input_filename, "rb")
@@ -695,7 +690,7 @@ if __name__ == "__main__":
             in_char = input_file.read(1)
             in_num = ord(in_char)
             if in_num == 0xD8:
-                print("SOI")
+                print("Start of image")
             elif 0xE0 <= in_num <= 0xEF:
                 print("APP%x" % (in_num - 0xe0))
                 read_app(in_num - 0XE0, input_file)
@@ -715,16 +710,16 @@ if __name__ == "__main__":
             elif in_num == 0xCC:
                 print("DAC")
             elif 0XC0 <= in_num <= 0XCF:
-                print("SOF%x" % (in_num - 0xC0))
+                print("Start of frame %x" % (in_num - 0xC0))
                 read_sof(in_num - 0xC0, input_file)
             elif in_num == 0xDA:
-                print("SOS")
+                print("Start of scan")
                 read_sos(input_file)
                 bit_stream = bit_read(input_file)
                 while not EOI:
                     data.append(read_mcu())
             elif in_num == 0xD9:
-                print("EOI")
+                print("End of image")
             # print("FF%02X" % in_num)
 
         in_char = input_file.read(1)
